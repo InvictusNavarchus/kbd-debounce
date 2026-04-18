@@ -256,7 +256,7 @@ fn log_suppressed(event: &InputEvent) {
         0 => "UP",
         _ => "?",
     };
-    println!(
+    eprintln!(
         "  [suppressed] {action} {:?}  (chatter within threshold)",
         event.kind()
     );
