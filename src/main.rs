@@ -26,7 +26,7 @@ use std::{
 // ── configuration ────────────────────────────────────────────────────────────
 
 /// Key to debounce. Swap this out if a different key starts misbehaving.
-const TARGET_KEY: Key = Key::KEY_E;
+const TARGET_KEY: Key = Key::KEY_K;
 
 /// Default debounce window. Any DN event for TARGET_KEY arriving within this
 /// duration after the *last forwarded* DN is treated as chatter and dropped
@@ -79,6 +79,7 @@ fn run_filter_loop(
 
     loop {
         for event in real.fetch_events()? {
+
             let forward = should_forward(
                 &event,
                 threshold,
@@ -185,7 +186,7 @@ fn build_virtual_device(real: &Device) -> Result<VirtualDevice, Box<dyn std::err
 /// Find the first input device that looks like a real keyboard:
 /// must support KEY_E, KEY_SPACE, and KEY_ENTER.
 fn auto_detect_keyboard() -> Result<PathBuf, Box<dyn std::error::Error>> {
-    let must_have = [Key::KEY_E, Key::KEY_SPACE, Key::KEY_ENTER];
+    let must_have = [Key::KEY_K, Key::KEY_SPACE, Key::KEY_ENTER];
 
     for (path, device) in evdev::enumerate() {
         if let Some(keys) = device.supported_keys() {
