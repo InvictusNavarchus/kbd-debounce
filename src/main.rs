@@ -21,8 +21,9 @@ use evdev::{
 };
 use std::{
     env,
+    os::unix::io::AsRawFd,
     path::PathBuf,
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 
@@ -50,26 +51,60 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // (e.g. the Enter keypress used to launch this program from a terminal).
     // Without this, those events are immediately re-injected through the virtual
     // device causing rapid-fire input on startup.
+    //
+    // IMPORTANT: fetch_events() blocks when the kernel buffer is empty. We must
+    // guard every call with events_available() (poll timeout=0) so the drain
+    // loop never stalls waiting for input that would leak into run_filter_loop.
     print!("Waiting for all keys to be released…");
     loop {
         let keys_held = real
             .get_key_state()
             .map(|ks| ks.iter().next().is_some())
             .unwrap_or(false);
-        // Drain buffered events unconditionally — including the final iteration
-        // where keys_held is false. The kernel can still have UP events buffered
-        // even after get_key_state() reports all-clear, and those would otherwise
-        // leak into the main filter loop and get re-injected.
-        for _ in real.fetch_events()? {}
+
+        // Drain all currently buffered events — non-blocking because we only
+        // call fetch_events() when poll confirms data is ready.
+        while events_available(real.as_raw_fd()) {
+            for _ in real.fetch_events()? {}
+        }
+
         if !keys_held {
+            // Wait 50 ms for any in-flight UP events to arrive in the kernel
+            // buffer (e.g. the release event for the Enter key used to launch
+            // this program), then do one final drain before handing off.
+            std::thread::sleep(Duration::from_millis(50));
+            while events_available(real.as_raw_fd()) {
+                for _ in real.fetch_events()? {}
+            }
             break;
         }
+
+        std::thread::sleep(Duration::from_millis(5)); // avoid busy-spin while held
     }
     println!(" done.\nRunning… (Ctrl-C to stop)\n");
 
     // Hand off to the debounce filter loop
     run_filter_loop(&mut real, &mut virt, threshold, log_forward)?;
     Ok(())
+}
+
+// ── startup drain helper ─────────────────────────────────────────────────────
+
+/// Returns `true` if the device fd has events ready to read right now.
+///
+/// Uses `poll(timeout=0)` which returns immediately regardless of readiness —
+/// it never blocks. This lets us call `fetch_events()` (which *does* block on
+/// an empty buffer) only when we know data is waiting, avoiding a stall in the
+/// startup drain loop.
+fn events_available(fd: std::os::unix::io::RawFd) -> bool {
+    let mut pfd = libc::pollfd {
+        fd,
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    // SAFETY: pfd is a valid stack-allocated pollfd, count=1, timeout=0.
+    let ret = unsafe { libc::poll(&mut pfd, 1, 0) };
+    ret > 0 && (pfd.revents & libc::POLLIN) != 0
 }
 
 // ── virtual device construction ───────────────────────────────────────────────
