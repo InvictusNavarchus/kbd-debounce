@@ -249,7 +249,7 @@ fn process_event(
                     state.suppressed = false;
                     state.pending.clear();
                     let msg =
-                        format!("[{ts}] ↓ {key:?}  FORWARD   (first press, no prior UP recorded)");
+                        format!("{} {} {}", ts.dimmed(), "↓ FORWARD".green(), format!("{key:?}  (first press, no prior UP recorded)"));
                     if log_forward {
                         eprintln!("{msg}");
                     } else {
@@ -271,7 +271,10 @@ fn process_event(
                             eprintln!("{msg}");
                         }
                         eprintln!(
-                            "[{ts}] ↓ {key:?}  SUPPRESS  gap={gap_ms:.2}ms < {active_threshold_ms}ms ({threshold_label} threshold)  [chatter]"
+                            "{} {} {}",
+                            ts.dimmed(),
+                            "↓ SUPPRESS".red().bold(),
+                            format!("{key:?}  gap={gap_ms:.2}ms < {active_threshold_ms}ms ({threshold_label} threshold)  [chatter]")
                         );
                         false
                     } else {
@@ -282,7 +285,10 @@ fn process_event(
                         state.suppressed = false;
                         state.pending.clear();
                         let msg = format!(
-                            "[{ts}] ↓ {key:?}  FORWARD   gap={gap_ms:.2}ms ≥ {active_threshold_ms}ms ({threshold_label} threshold)"
+                            "{} {} {}",
+                            ts.dimmed(),
+                            "↓ FORWARD".green(),
+                            format!("{key:?}  gap={gap_ms:.2}ms ≥ {active_threshold_ms}ms ({threshold_label} threshold)")
                         );
                         if log_forward {
                             eprintln!("{msg}");
@@ -305,7 +311,12 @@ fn process_event(
                 for msg in state.pending.drain(..) {
                     eprintln!("{msg}");
                 }
-                eprintln!("[{ts}] ↑ {key:?}  SUPPRESS  (paired UP for suppressed DN)");
+                eprintln!(
+                    "{} {} {}",
+                    ts.dimmed(),
+                    "↑ SUPPRESS".red().bold(),
+                    format!("{key:?}  (paired UP for suppressed DN)")
+                );
                 false
             } else {
                 let now = Instant::now();
@@ -323,10 +334,19 @@ fn process_event(
                 let msg = if state.last_hold_was_short {
                     let next_ms = EXTENDED_THRESHOLD_MS;
                     format!(
-                        "[{ts}] ↑ {key:?}  FORWARD   hold={hold_str}  ⚠ short hold → next threshold={next_ms}ms (extended)"
+                        "{} {} {} {}",
+                        ts.dimmed(),
+                        "↑ FORWARD".green(),
+                        format!("{key:?}  hold={hold_str}"),
+                        format!("⚠ short hold → next threshold={next_ms}ms (extended)").yellow()
                     )
                 } else {
-                    format!("[{ts}] ↑ {key:?}  FORWARD   hold={hold_str}")
+                    format!(
+                        "{} {} {}",
+                        ts.dimmed(),
+                        "↑ FORWARD".green(),
+                        format!("{key:?}  hold={hold_str}")
+                    )
                 };
 
                 if log_forward {
