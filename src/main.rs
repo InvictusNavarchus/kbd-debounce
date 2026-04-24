@@ -9,7 +9,6 @@
 //!   Virtual keyboard  → /dev/input/eventY  (seen by X11/Wayland/apps)
 //!
 //! Usage:
-//!   sudo ./kbd-debounce                  # auto-detect keyboard
 //!   sudo ./kbd-debounce /dev/input/event4
 //!   sudo ./kbd-debounce /dev/input/event4 --threshold-ms 12
 
@@ -272,23 +271,6 @@ fn build_virtual_device(real: &Device) -> Result<VirtualDevice, Box<dyn std::err
     Ok(builder.build()?)
 }
 
-// ── device auto-detection ─────────────────────────────────────────────────────
-
-/// Find the first input device that looks like a real keyboard:
-/// must support KEY_E, KEY_SPACE, and KEY_ENTER.
-fn auto_detect_keyboard() -> Result<PathBuf, Box<dyn std::error::Error>> {
-    let must_have = [Key::KEY_K, Key::KEY_SPACE, Key::KEY_ENTER];
-
-    for (path, device) in evdev::enumerate() {
-        if let Some(keys) = device.supported_keys() {
-            if must_have.iter().all(|k| keys.contains(*k)) {
-                return Ok(path);
-            }
-        }
-    }
-    Err("No keyboard device found. Try passing the path manually (e.g. /dev/input/event4).".into())
-}
-
 // ── argument parsing ──────────────────────────────────────────────────────────
 
 fn parse_args() -> Result<(PathBuf, u64), Box<dyn std::error::Error>> {
@@ -310,12 +292,10 @@ fn parse_args() -> Result<(PathBuf, u64), Box<dyn std::error::Error>> {
             }
             "--help" | "-h" => {
                 println!(
-                    "Usage: kbd-debounce [DEVICE_PATH] [--threshold-ms N]\n\
+                    "Usage: kbd-debounce <DEVICE_PATH> [--threshold-ms N]\n\
                      \n\
                      DEVICE_PATH      path to keyboard, e.g. /dev/input/event4\n\
-                     --threshold-ms N debounce window in ms (default: {DEFAULT_THRESHOLD_MS})\n\
-                     \n\
-                     Omit DEVICE_PATH to auto-detect the first keyboard."
+                     --threshold-ms N debounce window in ms (default: {DEFAULT_THRESHOLD_MS})"
                 );
                 std::process::exit(0);
             }
@@ -332,8 +312,7 @@ fn parse_args() -> Result<(PathBuf, u64), Box<dyn std::error::Error>> {
     let path = match device_path {
         Some(p) => p,
         None => {
-            println!("No device specified — auto-detecting keyboard…");
-            auto_detect_keyboard()?
+            return Err("Error: DEVICE_PATH is required. Run `kbd-debounce --help` for usage.".into());
         }
     };
 
