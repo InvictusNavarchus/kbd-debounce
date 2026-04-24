@@ -34,7 +34,8 @@ const TARGET_KEY: Key = Key::KEY_K;
 ///
 /// From the log analysis: bounce intervals were 7–20 ms, real inter-key gaps
 /// are well above 30 ms even at 150 WPM. 15 ms is a safe middle ground.
-const DEFAULT_THRESHOLD_MS: u64 = 15;
+/// personal test data shows that the bounce range between 6-17.9 ms. setting it to 30ms is much safer
+const DEFAULT_THRESHOLD_MS: u64 = 30;
 
 // ── entry point ───────────────────────────────────────────────────────────────
 
