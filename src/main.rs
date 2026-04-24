@@ -263,6 +263,7 @@ fn process_event(
 
                     if gap < active_threshold {
                         state.suppressed = true;
+                        state.last_dn_at = Some(now);
                         // Flush pending forward logs so the user sees the
                         // forwarded events that immediately preceded this
                         // suppression — they provide the context (hold time,
@@ -304,6 +305,13 @@ fn process_event(
         // ── Key Up ────────────────────────────────────────────────────────────
         0 => {
             if state.suppressed {
+                let now = Instant::now();
+                let hold = state.last_dn_at.map(|t| now.duration_since(t));
+                let hold_ms = hold.map(|h| h.as_micros() as f64 / 1000.0);
+                let hold_str = hold_ms
+                    .map(|ms| format!("{ms:.2}ms"))
+                    .unwrap_or_else(|| "?".to_string());
+
                 // Drop the UP that pairs with the suppressed DN.
                 state.suppressed = false;
                 state.last_hold_was_short = false;
@@ -315,7 +323,7 @@ fn process_event(
                     "{} {} {}",
                     ts.dimmed(),
                     "↑ SUPPRESS".red().bold(),
-                    format!("{key:?}  (paired UP for suppressed DN)")
+                    format!("{key:?}  hold={hold_str} (paired UP for suppressed DN)")
                 );
                 false
             } else {
