@@ -17,6 +17,7 @@ use evdev::{
     Device, InputEvent, InputEventKind, Key,
 };
 use std::{
+    collections::HashMap,
     env,
     path::PathBuf,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -24,10 +25,10 @@ use std::{
 
 // ── configuration ────────────────────────────────────────────────────────────
 
-/// Key to debounce. Swap this out if a different key starts misbehaving.
-const TARGET_KEY: Key = Key::KEY_K;
+/// Keys to debounce. Add or remove entries as needed.
+const TARGET_KEYS: &[Key] = &[Key::KEY_K, Key::KEY_L];
 
-/// Default debounce window. Any DN event for TARGET_KEY arriving within this
+/// Default debounce window. Any DN event for a TARGET_KEY arriving within this
 /// duration after the *last forwarded* UP is treated as chatter and dropped
 /// (together with its matching UP).
 ///
@@ -45,6 +46,39 @@ const EXTENDED_THRESHOLD_MS: u64 = 60;
 /// extended debouncing for the next cycle.
 const SHORT_HOLD_THRESHOLD_MS: u64 = 20;
 
+// ── per-key debounce state ────────────────────────────────────────────────────
+
+/// All mutable debounce state that must be tracked independently for each
+/// target key.  One instance lives in the `HashMap<Key, PerKeyState>` that is
+/// initialised in `run_filter_loop`.
+struct PerKeyState {
+    /// Instant of the last UP we actually let through (for gap measurement).
+    last_forwarded_up: Option<Instant>,
+    /// Instant of the last DN we forwarded (to measure hold duration).
+    last_dn_at: Option<Instant>,
+    /// true while we are inside a suppressed press/release pair (so we can
+    /// also swallow the matching UP).
+    suppressed: bool,
+    /// Was the previous hold abnormally short?  If so, use the extended
+    /// threshold for the next DN.
+    last_hold_was_short: bool,
+    /// Buffered forward log messages, emitted only when a subsequent suppress
+    /// provides context.
+    pending: Vec<String>,
+}
+
+impl PerKeyState {
+    fn new() -> Self {
+        Self {
+            last_forwarded_up: None,
+            last_dn_at: None,
+            suppressed: false,
+            last_hold_was_short: false,
+            pending: Vec::new(),
+        }
+    }
+}
+
 // ── entry point ───────────────────────────────────────────────────────────────
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -52,7 +86,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("kbd-debounce starting");
     println!("  device    : {}", device_path.display());
-    println!("  target key: {TARGET_KEY:?}");
+    println!("  target keys: {TARGET_KEYS:?}");
     println!("  threshold : {threshold} ms");
     println!("  log fwd   : {log_forward}");
 
@@ -93,12 +127,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 /// Core event loop.
 ///
-/// State tracked per-loop (only for TARGET_KEY):
+/// State tracked per-loop (only for TARGET_KEYS):
 /// - `last_forwarded_up`  — Instant of the last UP we actually let through
 /// - `suppressed`         — true while we are inside a suppressed press/release
 ///                          pair (so we can also swallow the matching UP)
 /// - `pending`            — buffered forward log messages, emitted only when a
 ///                          subsequent suppress provides context
+///
+/// Each target key has its own independent `PerKeyState` stored in a HashMap.
 fn run_filter_loop(
     real: &mut Device,
     virt: &mut VirtualDevice,
@@ -108,24 +144,33 @@ fn run_filter_loop(
     let threshold = Duration::from_millis(threshold_ms);
     let extended_threshold = Duration::from_millis(EXTENDED_THRESHOLD_MS);
 
-    let mut last_forwarded_up: Option<Instant> = None;
-    let mut last_dn_at: Option<Instant> = None;   // to measure hold duration
-    let mut suppressed = false;
-    let mut last_hold_was_short = false; // was the previous hold abnormally short?
-    let mut pending: Vec<String> = Vec::new();
+    // Initialise independent debounce state for every target key.
+    let mut key_states: HashMap<Key, PerKeyState> = TARGET_KEYS
+        .iter()
+        .map(|&k| (k, PerKeyState::new()))
+        .collect();
 
     loop {
         for event in real.fetch_events()? {
+            // Determine whether this event belongs to one of the target keys.
+            // Non-target keys are forwarded immediately without touching any state.
+            let target_key = match event.kind() {
+                InputEventKind::Key(k) if key_states.contains_key(&k) => k,
+                _ => {
+                    virt.emit(&[event])?;
+                    continue;
+                }
+            };
+
+            let state = key_states.get_mut(&target_key).unwrap();
+
             let forward = process_event(
                 &event,
+                target_key,
                 threshold,
                 extended_threshold,
-                &mut last_forwarded_up,
-                &mut last_dn_at,
-                &mut suppressed,
-                &mut last_hold_was_short,
+                state,
                 log_forward,
-                &mut pending,
             );
 
             if forward {
@@ -138,7 +183,7 @@ fn run_filter_loop(
 /// Decide whether the event should be forwarded, log it with full context,
 /// and update all relevant state.
 ///
-/// Logging behaviour (TARGET_KEY only; other keys are silent):
+/// Logging behaviour (TARGET_KEYS only; other keys are silent):
 ///   • Suppressed events are always logged immediately.
 ///   • Forwarded events are either:
 ///     - With -v:  logged immediately.
@@ -165,19 +210,12 @@ fn run_filter_loop(
 ///   • Forward unconditionally (no logging — would be extremely noisy).
 fn process_event(
     event: &InputEvent,
+    key: Key,
     threshold: Duration,
     extended_threshold: Duration,
-    last_forwarded_up: &mut Option<Instant>,
-    last_dn_at: &mut Option<Instant>,
-    suppressed: &mut bool,
-    last_hold_was_short: &mut bool,
+    state: &mut PerKeyState,
     log_forward: bool,
-    pending: &mut Vec<String>,
 ) -> bool {
-    // Non-target key or repeat: pass through silently.
-    if event.kind() != InputEventKind::Key(TARGET_KEY) {
-        return true;
-    }
     // Auto-repeat (value == 2): also forward silently — very different cadence
     // from bounce and would produce extremely noisy logs.
     if event.value() == 2 {
@@ -185,13 +223,13 @@ fn process_event(
     }
 
     let ts = fmt_ts();
-    let active_threshold = if *last_hold_was_short {
+    let active_threshold = if state.last_hold_was_short {
         extended_threshold
     } else {
         threshold
     };
     let active_threshold_ms = active_threshold.as_millis();
-    let threshold_label = if *last_hold_was_short {
+    let threshold_label = if state.last_hold_was_short {
         "extended"
     } else {
         "normal"
@@ -202,19 +240,18 @@ fn process_event(
         1 => {
             let now = Instant::now();
 
-            match *last_forwarded_up {
+            match state.last_forwarded_up {
                 None => {
                     // First press ever — no reference UP to compare against.
-                    *last_dn_at = Some(now);
-                    *suppressed = false;
-                    pending.clear();
-                    let msg = format!(
-                        "[{ts}] ↓ {TARGET_KEY:?}  FORWARD   (first press, no prior UP recorded)"
-                    );
+                    state.last_dn_at = Some(now);
+                    state.suppressed = false;
+                    state.pending.clear();
+                    let msg =
+                        format!("[{ts}] ↓ {key:?}  FORWARD   (first press, no prior UP recorded)");
                     if log_forward {
                         eprintln!("{msg}");
                     } else {
-                        pending.push(msg);
+                        state.pending.push(msg);
                     }
                     true
                 }
@@ -223,32 +260,32 @@ fn process_event(
                     let gap_ms = gap.as_micros() as f64 / 1000.0;
 
                     if gap < active_threshold {
-                        *suppressed = true;
+                        state.suppressed = true;
                         // Flush pending forward logs so the user sees the
                         // forwarded events that immediately preceded this
                         // suppression — they provide the context (hold time,
                         // short-hold warning, etc.).
-                        for msg in pending.drain(..) {
+                        for msg in state.pending.drain(..) {
                             eprintln!("{msg}");
                         }
                         eprintln!(
-                            "[{ts}] ↓ {TARGET_KEY:?}  SUPPRESS  gap={gap_ms:.2}ms < {active_threshold_ms}ms ({threshold_label} threshold)  [chatter]"
+                            "[{ts}] ↓ {key:?}  SUPPRESS  gap={gap_ms:.2}ms < {active_threshold_ms}ms ({threshold_label} threshold)  [chatter]"
                         );
                         false
                     } else {
                         // New clean press — previous cycle completed without
                         // bounce, so its buffered forward logs are no longer
                         // interesting.  Discard them and start a fresh buffer.
-                        *last_dn_at = Some(now);
-                        *suppressed = false;
-                        pending.clear();
+                        state.last_dn_at = Some(now);
+                        state.suppressed = false;
+                        state.pending.clear();
                         let msg = format!(
-                            "[{ts}] ↓ {TARGET_KEY:?}  FORWARD   gap={gap_ms:.2}ms ≥ {active_threshold_ms}ms ({threshold_label} threshold)"
+                            "[{ts}] ↓ {key:?}  FORWARD   gap={gap_ms:.2}ms ≥ {active_threshold_ms}ms ({threshold_label} threshold)"
                         );
                         if log_forward {
                             eprintln!("{msg}");
                         } else {
-                            pending.push(msg);
+                            state.pending.push(msg);
                         }
                         true
                     }
@@ -258,42 +295,42 @@ fn process_event(
 
         // ── Key Up ────────────────────────────────────────────────────────────
         0 => {
-            if *suppressed {
+            if state.suppressed {
                 // Drop the UP that pairs with the suppressed DN.
-                *suppressed = false;
-                *last_hold_was_short = false;
+                state.suppressed = false;
+                state.last_hold_was_short = false;
                 // Pending already flushed by the DN suppress; drain for safety.
-                for msg in pending.drain(..) {
+                for msg in state.pending.drain(..) {
                     eprintln!("{msg}");
                 }
-                eprintln!("[{ts}] ↑ {TARGET_KEY:?}  SUPPRESS  (paired UP for suppressed DN)");
+                eprintln!("[{ts}] ↑ {key:?}  SUPPRESS  (paired UP for suppressed DN)");
                 false
             } else {
                 let now = Instant::now();
-                let hold = last_dn_at.map(|t| now.duration_since(t));
+                let hold = state.last_dn_at.map(|t| now.duration_since(t));
                 let hold_ms = hold.map(|h| h.as_micros() as f64 / 1000.0);
                 let hold_str = hold_ms
                     .map(|ms| format!("{ms:.2}ms"))
                     .unwrap_or_else(|| "?".to_string());
 
-                *last_hold_was_short = hold
+                state.last_hold_was_short = hold
                     .map(|h| h < Duration::from_millis(SHORT_HOLD_THRESHOLD_MS))
                     .unwrap_or(false);
-                *last_forwarded_up = Some(now);
+                state.last_forwarded_up = Some(now);
 
-                let msg = if *last_hold_was_short {
+                let msg = if state.last_hold_was_short {
                     let next_ms = EXTENDED_THRESHOLD_MS;
                     format!(
-                        "[{ts}] ↑ {TARGET_KEY:?}  FORWARD   hold={hold_str}  ⚠ short hold → next threshold={next_ms}ms (extended)"
+                        "[{ts}] ↑ {key:?}  FORWARD   hold={hold_str}  ⚠ short hold → next threshold={next_ms}ms (extended)"
                     )
                 } else {
-                    format!("[{ts}] ↑ {TARGET_KEY:?}  FORWARD   hold={hold_str}")
+                    format!("[{ts}] ↑ {key:?}  FORWARD   hold={hold_str}")
                 };
 
                 if log_forward {
                     eprintln!("{msg}");
                 } else {
-                    pending.push(msg);
+                    state.pending.push(msg);
                 }
                 true
             }
