@@ -63,8 +63,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Grab exclusively — events stop reaching X11/Wayland until re-injected
     real.grab()?;
-    println!("Device grabbed. Running… (Ctrl-C to stop)\n");
+    println!("Device grabbed.");
 
+    // Drain any events already buffered in the kernel queue before the grab
+    // (e.g. the Enter keypress used to launch this program from a terminal).
+    // Without this, those events are immediately re-injected through the virtual
+    // device causing rapid-fire input on startup.
+    print!("Waiting for all keys to be released…");
+    loop {
+        let keys_held = real
+            .get_key_state()
+            .map(|ks| ks.iter().next().is_some())
+            .unwrap_or(false);
+        if !keys_held {
+            break;
+        }
+        // Consume and discard buffered events (DNs, auto-repeats, etc.)
+        // fetch_events() returns immediately when events are queued.
+        for _ in real.fetch_events()? {}
+    }
+    println!(" done.\nRunning… (Ctrl-C to stop)\n");
     run_filter_loop(&mut real, &mut virt, threshold)?;
     Ok(())
 }
