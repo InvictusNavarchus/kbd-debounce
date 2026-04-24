@@ -37,6 +37,15 @@ const TARGET_KEY: Key = Key::KEY_K;
 /// personal test data shows that the bounce range between 6-17.9 ms. setting it to 30ms is much safer
 const DEFAULT_THRESHOLD_MS: u64 = 30;
 
+/// Extended debounce window (3x threshold) used when the previous press was
+/// abnormally short (< 20 ms). This catches the slower bounce mode where a
+/// brief false contact is followed by re-engagement at 33–50 ms later.
+const EXTENDED_THRESHOLD_MULTIPLIER: u64 = 3;
+
+/// Hold duration threshold to detect a short/bouncy press that should trigger
+/// extended debouncing for the next cycle.
+const SHORT_HOLD_THRESHOLD_MS: u64 = 20;
+
 // ── entry point ───────────────────────────────────────────────────────────────
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -74,9 +83,12 @@ fn run_filter_loop(
     threshold_ms: u64,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let threshold = Duration::from_millis(threshold_ms);
+    let extended_threshold = Duration::from_millis(threshold_ms * EXTENDED_THRESHOLD_MULTIPLIER);
 
     let mut last_forwarded_up: Option<Instant> = None;
+    let mut last_dn_at: Option<Instant> = None;   // to measure hold duration
     let mut suppressed = false; // are we currently dropping a bounce press?
+    let mut last_hold_was_short = false; // was the previous hold abnormally short?
 
     loop {
         for event in real.fetch_events()? {
@@ -84,8 +96,11 @@ fn run_filter_loop(
             let forward = should_forward(
                 &event,
                 threshold,
+                extended_threshold,
                 &mut last_forwarded_up,
+                &mut last_dn_at,
                 &mut suppressed,
+                &mut last_hold_was_short,
             );
 
             if forward {
@@ -101,22 +116,27 @@ fn run_filter_loop(
 ///
 /// Logic for TARGET_KEY DN (value == 1):
 ///   • If no previous UP was forwarded, let it through.
-///   • If the gap since the last forwarded UP is ≥ threshold → new legitimate
-///     press: forward it.
-///   • If the gap is < threshold → bounce: suppress this DN *and* its UP.
+///   • If the gap since the last forwarded UP is ≥ active threshold → new
+///     legitimate press: forward it. Uses extended threshold if the previous
+///     hold was abnormally short (< 20 ms), indicating a chattering switch.
+///   • If the gap is < active threshold → bounce: suppress this DN *and* its UP.
 ///
 /// Logic for TARGET_KEY UP (value == 0):
 ///   • If we just suppressed the matching DN, suppress this UP too (prevents
 ///     a stray "key release" with no matching "key press").
-///   • Otherwise forward normally and record the time.
+///   • Otherwise forward normally, record the time, and detect if the hold
+///     duration was short (< 20 ms) to trigger extended threshold next cycle.
 ///
 /// Logic for TARGET_KEY repeat (value == 2) and all other keys:
 ///   • Forward unconditionally.
 fn should_forward(
     event: &InputEvent,
     threshold: Duration,
+    extended_threshold: Duration,
     last_forwarded_up: &mut Option<Instant>,
+    last_dn_at: &mut Option<Instant>,
     suppressed: &mut bool,
+    last_hold_was_short: &mut bool,
 ) -> bool {
     // Only inspect key events for our target
     if event.kind() != InputEventKind::Key(TARGET_KEY) {
@@ -127,14 +147,21 @@ fn should_forward(
         // ── Key Down ─────────────────────────────────────────────────────────
         1 => {
             let now = Instant::now();
+            let active_threshold = if *last_hold_was_short {
+                extended_threshold  // previous press was a brief chatter contact
+            } else {
+                threshold
+            };
+
             let is_bounce = last_forwarded_up
-                .map(|t| now.duration_since(t) < threshold)
+                .map(|t| now.duration_since(t) < active_threshold)
                 .unwrap_or(false);
 
             if is_bounce {
                 *suppressed = true;
                 false
             } else {
+                *last_dn_at = Some(now);
                 *suppressed = false;
                 true
             }
@@ -145,9 +172,23 @@ fn should_forward(
             if *suppressed {
                 // Drop the UP that pairs with the suppressed DN
                 *suppressed = false;
+                *last_hold_was_short = false;
                 false
             } else {
-                *last_forwarded_up = Some(Instant::now());
+                let now = Instant::now();
+                let hold = last_dn_at.map(|t| now.duration_since(t));
+                *last_hold_was_short = hold
+                    .map(|h| h < Duration::from_millis(SHORT_HOLD_THRESHOLD_MS))
+                    .unwrap_or(false);
+
+                if *last_hold_was_short {
+                    eprintln!(
+                        "  [adaptive] short hold detected ({:?}) — extending threshold for next cycle",
+                        hold.unwrap_or_default()
+                    );
+                }
+
+                *last_forwarded_up = Some(now);
                 true
             }
         }
