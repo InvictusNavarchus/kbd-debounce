@@ -95,6 +95,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// - `last_forwarded_up`  — Instant of the last UP we actually let through
 /// - `suppressed`         — true while we are inside a suppressed press/release
 ///                          pair (so we can also swallow the matching UP)
+/// - `pending`            — buffered forward log messages, emitted only when a
+///                          subsequent suppress provides context
 fn run_filter_loop(
     real: &mut Device,
     virt: &mut VirtualDevice,
@@ -106,8 +108,9 @@ fn run_filter_loop(
 
     let mut last_forwarded_up: Option<Instant> = None;
     let mut last_dn_at: Option<Instant> = None;   // to measure hold duration
-    let mut suppressed = false; // are we currently dropping a bounce press?
+    let mut suppressed = false;
     let mut last_hold_was_short = false; // was the previous hold abnormally short?
+    let mut pending: Vec<String> = Vec::new();
 
     loop {
         for event in real.fetch_events()? {
@@ -120,6 +123,7 @@ fn run_filter_loop(
                 &mut suppressed,
                 &mut last_hold_was_short,
                 log_forward,
+                &mut pending,
             );
 
             if forward {
@@ -131,6 +135,16 @@ fn run_filter_loop(
 
 /// Decide whether the event should be forwarded, log it with full context,
 /// and update all relevant state.
+///
+/// Logging behaviour (TARGET_KEY only; other keys are silent):
+///   • Suppressed events are always logged immediately.
+///   • Forwarded events are either:
+///     - With -v:  logged immediately.
+///     - Without -v:  buffered in `pending`.  The buffer is flushed (printed)
+///       right before a suppress log, giving context for *why* the suppress
+///       happened.  When a new forwarded DN starts a clean cycle (gap ≥
+///       threshold), the buffer is cleared — those old forwards are no longer
+///       interesting.
 ///
 /// Logic for TARGET_KEY DN (value == 1):
 ///   • If no previous UP was forwarded, let it through.
@@ -156,6 +170,7 @@ fn process_event(
     suppressed: &mut bool,
     last_hold_was_short: &mut bool,
     log_forward: bool,
+    pending: &mut Vec<String>,
 ) -> bool {
     // Non-target key or repeat: pass through silently.
     if event.kind() != InputEventKind::Key(TARGET_KEY) {
@@ -174,7 +189,11 @@ fn process_event(
         threshold
     };
     let active_threshold_ms = active_threshold.as_millis();
-    let threshold_label = if *last_hold_was_short { "extended" } else { "normal" };
+    let threshold_label = if *last_hold_was_short {
+        "extended"
+    } else {
+        "normal"
+    };
 
     match event.value() {
         // ── Key Down ─────────────────────────────────────────────────────────
@@ -186,10 +205,14 @@ fn process_event(
                     // First press ever — no reference UP to compare against.
                     *last_dn_at = Some(now);
                     *suppressed = false;
+                    pending.clear();
+                    let msg = format!(
+                        "[{ts}] ↓ {TARGET_KEY:?}  FORWARD   (first press, no prior UP recorded)"
+                    );
                     if log_forward {
-                        eprintln!(
-                            "[{ts}] ↓ {TARGET_KEY:?}  FORWARD   (first press, no prior UP recorded)"
-                        );
+                        eprintln!("{msg}");
+                    } else {
+                        pending.push(msg);
                     }
                     true
                 }
@@ -199,17 +222,31 @@ fn process_event(
 
                     if gap < active_threshold {
                         *suppressed = true;
+                        // Flush pending forward logs so the user sees the
+                        // forwarded events that immediately preceded this
+                        // suppression — they provide the context (hold time,
+                        // short-hold warning, etc.).
+                        for msg in pending.drain(..) {
+                            eprintln!("{msg}");
+                        }
                         eprintln!(
                             "[{ts}] ↓ {TARGET_KEY:?}  SUPPRESS  gap={gap_ms:.2}ms < {active_threshold_ms}ms ({threshold_label} threshold)  [chatter]"
                         );
                         false
                     } else {
+                        // New clean press — previous cycle completed without
+                        // bounce, so its buffered forward logs are no longer
+                        // interesting.  Discard them and start a fresh buffer.
                         *last_dn_at = Some(now);
                         *suppressed = false;
+                        pending.clear();
+                        let msg = format!(
+                            "[{ts}] ↓ {TARGET_KEY:?}  FORWARD   gap={gap_ms:.2}ms ≥ {active_threshold_ms}ms ({threshold_label} threshold)"
+                        );
                         if log_forward {
-                            eprintln!(
-                                "[{ts}] ↓ {TARGET_KEY:?}  FORWARD   gap={gap_ms:.2}ms ≥ {active_threshold_ms}ms ({threshold_label} threshold)"
-                            );
+                            eprintln!("{msg}");
+                        } else {
+                            pending.push(msg);
                         }
                         true
                     }
@@ -223,9 +260,11 @@ fn process_event(
                 // Drop the UP that pairs with the suppressed DN.
                 *suppressed = false;
                 *last_hold_was_short = false;
-                eprintln!(
-                    "[{ts}] ↑ {TARGET_KEY:?}  SUPPRESS  (paired UP for suppressed DN)"
-                );
+                // Pending already flushed by the DN suppress; drain for safety.
+                for msg in pending.drain(..) {
+                    eprintln!("{msg}");
+                }
+                eprintln!("[{ts}] ↑ {TARGET_KEY:?}  SUPPRESS  (paired UP for suppressed DN)");
                 false
             } else {
                 let now = Instant::now();
@@ -240,19 +279,19 @@ fn process_event(
                     .unwrap_or(false);
                 *last_forwarded_up = Some(now);
 
-                if *last_hold_was_short {
+                let msg = if *last_hold_was_short {
                     let next_ms = EXTENDED_THRESHOLD_MS;
-                    if log_forward {
-                        eprintln!(
-                            "[{ts}] ↑ {TARGET_KEY:?}  FORWARD   hold={hold_str}  ⚠ short hold → next threshold={next_ms}ms (extended)"
-                        );
-                    }
+                    format!(
+                        "[{ts}] ↑ {TARGET_KEY:?}  FORWARD   hold={hold_str}  ⚠ short hold → next threshold={next_ms}ms (extended)"
+                    )
                 } else {
-                    if log_forward {
-                        eprintln!(
-                            "[{ts}] ↑ {TARGET_KEY:?}  FORWARD   hold={hold_str}"
-                        );
-                    }
+                    format!("[{ts}] ↑ {TARGET_KEY:?}  FORWARD   hold={hold_str}")
+                };
+
+                if log_forward {
+                    eprintln!("{msg}");
+                } else {
+                    pending.push(msg);
                 }
                 true
             }
@@ -313,7 +352,8 @@ fn parse_args() -> Result<(PathBuf, u64, bool), Box<dyn std::error::Error>> {
                      Options:\n\
                      DEVICE_PATH          path to keyboard, e.g. /dev/input/event4\n\
                      --threshold-ms N     debounce window in ms (default: {DEFAULT_THRESHOLD_MS})\n\
-                     --log-forward, -v    log forwarded events (default is to only log suppressed events)"
+                     --log-forward, -v    log forwarded events immediately (default: forward logs\n\
+                                          shown only when followed by a suppress for context)"
                 );
                 std::process::exit(0);
             }
@@ -330,7 +370,9 @@ fn parse_args() -> Result<(PathBuf, u64, bool), Box<dyn std::error::Error>> {
     let path = match device_path {
         Some(p) => p,
         None => {
-            return Err("Error: DEVICE_PATH is required. Run `kbd-debounce --help` for usage.".into());
+            return Err(
+                "Error: DEVICE_PATH is required. Run `kbd-debounce --help` for usage.".into(),
+            );
         }
     };
 
