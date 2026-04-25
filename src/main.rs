@@ -14,7 +14,7 @@
 
 mod debounce;
 
-use chrono::{Utc, Timelike};
+use chrono::{Local, Timelike};
 use debounce::{run_filter_loop, DEFAULT_THRESHOLD_MS, TARGET_KEYS};
 use evdev::{
     uinput::{VirtualDevice, VirtualDeviceBuilder},
@@ -184,7 +184,7 @@ fn parse_args() -> Result<(PathBuf, u64, bool), Box<dyn std::error::Error>> {
 
 /// Returns a local wall-clock timestamp string: `HH:MM:SS.mmm`
 pub fn fmt_ts() -> String {
-    let now: chrono::DateTime<Utc> = Utc::now();
+    let now: chrono::DateTime<Local> = Local::now();
     format!(
         "{:02}:{:02}:{:02}.{:03}",
         now.hour(),
