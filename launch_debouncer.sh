@@ -2,7 +2,9 @@
 # Launch keyboard-debouncer using settings from debouncer.conf.
 #
 # Config fields (see debouncer.conf.example for documentation):
-#   KEYBOARD_NAME  — required; physical keyboard name as shown by evtest
+#   KEYBOARD_NAME  — physical keyboard name as shown by evtest
+#   DEVICE_PATH    — direct path to event node, e.g. /dev/input/event10
+#                    (overrides KEYBOARD_NAME if both are set)
 #   KEYS           — required; comma-separated KEY_* names to debounce (e.g. KEY_K,KEY_L)
 #   THRESHOLD_MS   — optional; debounce window in ms (default: 30)
 #   LOG_FORWARD    — optional; true/false, log forwarded events (default: false)
@@ -26,11 +28,48 @@ conf_get() {
     grep -m1 "^${1}=" "$CONF_FILE" | cut -d= -f2-
 }
 
-# ── KEYBOARD_NAME (required) ────────────────────────────────────────────────
+# ── KEYBOARD_NAME / DEVICE_PATH ────────────────────────────────────────────
+# Either DEVICE_PATH (direct) or KEYBOARD_NAME (lookup) must be set.
+# If both are set, DEVICE_PATH wins and KEYBOARD_NAME is ignored.
+DEVICE_PATH=$(conf_get DEVICE_PATH)
 KEYBOARD_NAME=$(conf_get KEYBOARD_NAME)
-if [ -z "$KEYBOARD_NAME" ]; then
-    echo "Error: KEYBOARD_NAME is required in $CONF_FILE" >&2
-    exit 1
+
+if [ -n "$DEVICE_PATH" ]; then
+    # Direct path — validate it looks sane and exists.
+    if [[ ! "$DEVICE_PATH" =~ ^/dev/input/event[0-9]+$ ]]; then
+        echo "Error: DEVICE_PATH must be a path like /dev/input/event10, got: '$DEVICE_PATH'" >&2
+        exit 1
+    fi
+    if [ ! -e "$DEVICE_PATH" ]; then
+        echo "Error: DEVICE_PATH '$DEVICE_PATH' does not exist" >&2
+        exit 1
+    fi
+    if [ -n "$KEYBOARD_NAME" ]; then
+        echo "Note: DEVICE_PATH is set — KEYBOARD_NAME ('$KEYBOARD_NAME') is ignored" >&2
+    fi
+    DEVICE="$DEVICE_PATH"
+else
+    # Name-based lookup.
+    if [ -z "$KEYBOARD_NAME" ]; then
+        echo "Error: either KEYBOARD_NAME or DEVICE_PATH must be set in $CONF_FILE" >&2
+        exit 1
+    fi
+
+    DEVICE=""
+    for dev in /sys/class/input/event*; do
+        # Strip trailing whitespace/newlines — some kernels append a trailing space.
+        name=$(tr -d '\n' < "$dev/device/name" | sed 's/[[:space:]]*$//')
+        if [ "$name" = "$KEYBOARD_NAME" ]; then
+            DEVICE="/dev/input/$(basename "$dev")"
+            break
+        fi
+    done
+
+    if [ -z "$DEVICE" ]; then
+        echo "Error: no input device found with name '$KEYBOARD_NAME'" >&2
+        echo "       Run 'evtest' to list connected devices and update KEYBOARD_NAME in $CONF_FILE." >&2
+        exit 1
+    fi
 fi
 
 # ── KEYS (required) ─────────────────────────────────────────────────────────
@@ -61,22 +100,6 @@ elif [ "$LOG_FORWARD" != "true" ] && [ "$LOG_FORWARD" != "false" ]; then
     exit 1
 fi
 
-# ── Locate the matching input event device ──────────────────────────────────
-DEVICE=""
-for dev in /sys/class/input/event*; do
-    # Strip trailing whitespace/newlines — some kernels append a trailing space.
-    name=$(tr -d '\n' < "$dev/device/name" | sed 's/[[:space:]]*$//')
-    if [ "$name" = "$KEYBOARD_NAME" ]; then
-        DEVICE="/dev/input/$(basename "$dev")"
-        break
-    fi
-done
-
-if [ -z "$DEVICE" ]; then
-    echo "Error: no input device found with name '$KEYBOARD_NAME'" >&2
-    echo "       Run 'evtest' to list connected devices and update KEYBOARD_NAME in $CONF_FILE." >&2
-    exit 1
-fi
 
 # ── Build argument list ─────────────────────────────────────────────────────
 DEBOUNCER_ARGS=("$DEVICE" "--keys" "$KEYS" "--threshold-ms" "$THRESHOLD_MS")
@@ -85,7 +108,7 @@ if [ "$LOG_FORWARD" = "true" ]; then
 fi
 
 # ── Launch ──────────────────────────────────────────────────────────────────
-echo "Device   : $DEVICE ($KEYBOARD_NAME)"
+echo "Device   : $DEVICE${KEYBOARD_NAME:+ ($KEYBOARD_NAME)}"
 echo "Keys     : $KEYS"
 echo "Threshold: ${THRESHOLD_MS}ms"
 echo "Log fwd  : $LOG_FORWARD"

@@ -3,8 +3,14 @@
 # Run `evtest` to find your keyboard name and the KEY_* names of keys to debounce.
 
 # Physical keyboard name as reported by the kernel (from evtest or /sys/class/input).
-# REQUIRED.
+# Used to automatically find the /dev/input/eventX node on each boot.
+# Required unless DEVICE_PATH is set.
 KEYBOARD_NAME=your-keyboard-name-in-evtest
+
+# Direct path to the event device node. Overrides KEYBOARD_NAME if both are set.
+# Useful when the event number is stable (e.g. a USB keyboard always on event10).
+# Uncomment and set if you prefer to skip the name-based lookup.
+# DEVICE_PATH=/dev/input/event10
 
 # Keys to debounce — comma-separated, using KEY_* names exactly as shown by evtest.
 # REQUIRED: the program refuses to start without this.
