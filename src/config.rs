@@ -1,4 +1,4 @@
-use crate::debounce::DEFAULT_THRESHOLD_MS;
+use crate::debounce::{DEFAULT_EXTENDED_THRESHOLD_MS, DEFAULT_SHORT_HOLD_THRESHOLD_MS, DEFAULT_THRESHOLD_MS};
 use evdev::Key;
 use std::collections::HashMap;
 use std::{env, path::PathBuf};
@@ -24,7 +24,7 @@ fn find_device_by_name(target_name: &str) -> Option<PathBuf> {
     None
 }
 
-pub fn parse_args() -> Result<(PathBuf, Vec<Key>, u64, bool), Box<dyn std::error::Error>> {
+pub fn parse_args() -> Result<(PathBuf, Vec<Key>, u64, u64, u64, bool), Box<dyn std::error::Error>> {
     let mut args = env::args();
     let conf_path = if let Some(arg) = args.nth(1) {
         if arg == "--help" || arg == "-h" {
@@ -73,6 +73,16 @@ pub fn parse_args() -> Result<(PathBuf, Vec<Key>, u64, bool), Box<dyn std::error
         .and_then(|v| v.parse().ok())
         .unwrap_or(DEFAULT_THRESHOLD_MS);
 
+    let extended_threshold_ms = conf
+        .get("EXTENDED_THRESHOLD_MS")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(DEFAULT_EXTENDED_THRESHOLD_MS);
+
+    let short_hold_threshold_ms = conf
+        .get("SHORT_HOLD_THRESHOLD_MS")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(DEFAULT_SHORT_HOLD_THRESHOLD_MS);
+
     let log_forward = conf
         .get("LOG_FORWARD")
         .map(|v| v == "true")
@@ -91,5 +101,5 @@ pub fn parse_args() -> Result<(PathBuf, Vec<Key>, u64, bool), Box<dyn std::error
         return Err(format!("Device path {} does not exist", device_path.display()).into());
     }
 
-    Ok((device_path, target_keys, threshold_ms, log_forward))
+    Ok((device_path, target_keys, threshold_ms, extended_threshold_ms, short_hold_threshold_ms, log_forward))
 }

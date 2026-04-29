@@ -21,6 +21,14 @@ KEYS=KEY_K,KEY_L
 # Default: 30. Any re-press within this window after the last release is suppressed.
 THRESHOLD_MS=30
 
+# Extended debounce window in milliseconds.
+# Default: 100. Used when the previous press was abnormally short.
+EXTENDED_THRESHOLD_MS=100
+
+# Short hold duration threshold in milliseconds.
+# Default: 50. Hold duration below this will trigger extended debouncing for the next cycle.
+SHORT_HOLD_THRESHOLD_MS=50
+
 # Set to true to log every forwarded event immediately.
 # Default: false (forwarded events are only shown when followed by a suppressed one, for context).
 LOG_FORWARD=false

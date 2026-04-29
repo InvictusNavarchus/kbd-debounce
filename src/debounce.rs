@@ -22,11 +22,11 @@ pub const DEFAULT_THRESHOLD_MS: u64 = 30;
 /// Extended debounce window used when the previous press was
 /// abnormally short (< 20 ms). This catches the slower bounce mode where a
 /// brief false contact is followed by re-engagement at 33–50 ms later.
-pub const EXTENDED_THRESHOLD_MS: u64 = 100;
+pub const DEFAULT_EXTENDED_THRESHOLD_MS: u64 = 100;
 
 /// Hold duration threshold to detect a short/bouncy press that should trigger
 /// extended debouncing for the next cycle.
-const SHORT_HOLD_THRESHOLD_MS: u64 = 50;
+pub const DEFAULT_SHORT_HOLD_THRESHOLD_MS: u64 = 50;
 
 // ── per-key debounce state ────────────────────────────────────────────────────
 
@@ -116,10 +116,13 @@ pub fn run_filter_loop(
     virt: &mut VirtualDevice,
     keys: &[Key],
     threshold_ms: u64,
+    extended_threshold_ms: u64,
+    short_hold_threshold_ms: u64,
     log_forward: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let threshold = Duration::from_millis(threshold_ms);
-    let extended_threshold = Duration::from_millis(EXTENDED_THRESHOLD_MS);
+    let extended_threshold = Duration::from_millis(extended_threshold_ms);
+    let short_hold_threshold = Duration::from_millis(short_hold_threshold_ms);
 
     // Initialise independent debounce state for every target key.
     let mut key_states: HashMap<Key, PerKeyState> =
@@ -139,10 +142,17 @@ pub fn run_filter_loop(
 
             let state = key_states.get_mut(&target_key).unwrap();
 
-            let decision = process_event(&event, target_key, threshold, extended_threshold, state);
+            let decision = process_event(
+                &event,
+                target_key,
+                threshold,
+                extended_threshold,
+                short_hold_threshold,
+                state,
+            );
 
             let ts = crate::fmt_ts();
-            let forward = apply_decision(decision, &event, state, &ts, log_forward);
+            let forward = apply_decision(decision, &event, state, &ts, log_forward, short_hold_threshold);
 
             if forward {
                 virt.emit(&[event])?;
@@ -176,6 +186,7 @@ fn process_event(
     key: Key,
     threshold: Duration,
     extended_threshold: Duration,
+    short_hold_threshold: Duration,
     state: &PerKeyState,
 ) -> EventDecision {
     // Auto-repeat (value == 2): forward unconditionally, no decision logic needed.
@@ -228,10 +239,10 @@ fn process_event(
             } else {
                 let (hold, hold_str) = fmt_hold(state.last_dn_at);
                 let reason = if hold
-                    .map(|h| h < Duration::from_millis(SHORT_HOLD_THRESHOLD_MS))
+                    .map(|h| h < short_hold_threshold)
                     .unwrap_or(false)
                 {
-                    let next_ms = EXTENDED_THRESHOLD_MS;
+                    let next_ms = extended_threshold.as_millis();
                     format!(
                         "{key:?}  hold={hold_str}  ⚠ short hold → next threshold={next_ms}ms (extended)"
                     )
@@ -256,6 +267,7 @@ fn apply_decision(
     state: &mut PerKeyState,
     ts: &str,
     log_forward: bool,
+    short_hold_threshold: Duration,
 ) -> bool {
     match decision {
         EventDecision::Forward { reason } => {
@@ -286,7 +298,7 @@ fn apply_decision(
                     let now = Instant::now();
                     let hold = state.last_dn_at.map(|t| now.duration_since(t));
                     state.last_hold_was_short = hold
-                        .map(|h| h < Duration::from_millis(SHORT_HOLD_THRESHOLD_MS))
+                        .map(|h| h < short_hold_threshold)
                         .unwrap_or(false);
                     state.last_forwarded_up = Some(now);
                 }

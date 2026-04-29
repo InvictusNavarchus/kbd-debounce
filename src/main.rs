@@ -21,12 +21,14 @@ use std::{os::unix::io::AsRawFd, time::Duration};
 // ── entry point ───────────────────────────────────────────────────────────────
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let (device_path, keys, threshold, log_forward) = config::parse_args()?;
+    let (device_path, keys, threshold, extended_threshold, short_hold_threshold, log_forward) = config::parse_args()?;
 
     println!("kbd-debounce starting");
     println!("  device    : {}", device_path.display());
     println!("  target keys: {keys:?}");
     println!("  threshold : {threshold} ms");
+    println!("  ext thres : {extended_threshold} ms");
+    println!("  short hold: {short_hold_threshold} ms");
     println!("  log fwd   : {log_forward}");
 
     let mut real = Device::open(&device_path)?;
@@ -68,7 +70,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Running… (Ctrl-C to stop)\n");
 
     // Hand off to the debounce filter loop
-    run_filter_loop(&mut real, &mut virt, &keys, threshold, log_forward)?;
+    run_filter_loop(
+        &mut real,
+        &mut virt,
+        &keys,
+        threshold,
+        extended_threshold,
+        short_hold_threshold,
+        log_forward,
+    )?;
     Ok(())
 }
 
