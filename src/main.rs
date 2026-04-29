@@ -7,11 +7,6 @@
 //!   Physical keyboard → /dev/input/eventX  (grabbed exclusively)
 //!       ↓  [this daemon]
 //!   Virtual keyboard  → /dev/input/eventY  (seen by X11/Wayland/apps)
-//!
-//! Usage:
-//!   sudo ./keyboard-debouncer /dev/input/event4
-//!   sudo ./keyboard-debouncer /dev/input/event4 --threshold-ms 12
-
 mod debounce;
 
 use chrono::{Local, Timelike};
